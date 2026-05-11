@@ -1,0 +1,75 @@
+
+# Python
+
+__pycache__/
+
+*.pyc
+
+*.pyo
+
+*.egg-info/
+
+.pytest_cache/
+
+.ipynb_checkpoints/
+
+# Env
+
+.env
+
+venv/
+
+.venv/
+
+# IDE
+
+.vscode/
+
+.idea/
+
+# Data and checkpoints
+
+data/
+
+checkpoints/
+
+ckpts/
+
+*.hdf5
+
+*.h5
+
+*.ckpt
+
+*.pth
+
+*.safetensors
+
+# R3M
+
+r3m_cache/
+
+*.r3m
+
+# Results
+
+results/failure_videos/
+
+results/*.mp4
+
+# Logs
+
+logs/
+
+wandb/
+
+tb_logs/
+
+*.log
+
+# OS
+
+.DS_Store
+
+Thumbs.db
+
