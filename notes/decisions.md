@@ -15,3 +15,6 @@
 | 2026-05-12 | src/data.py + scripts/precompute_r3m.py preprocess_image augment 参数 | augment 路径 brightness / contrast 经 kwargs 由 caller（`scripts/precompute_r3m.py`）传入；data.py 不持默认值，未传则 `ValueError` | 用户讨论 | 否 |
 | 2026-05-12 | src/data.py preprocess_image 输出格式 | 输出 `(3, 224, 224)` float32 值域 $[0, 255]$，**不外部 ImageNet 归一化**（R3M 模型内部处理；外部再做会导致 train cache 与 eval 路径双重归一化） | 用户讨论 + 伪代码修订（原版本 `/255` + `TF.normalize` 已删） | 否 |
 | 2026-05-12 | scripts/precompute_r3m.py augment 参数取值 | `BRIGHTNESS = CONTRAST = 0.3`（经 kwargs 传入 `preprocess_image`） | 用户讨论 | 否 |
+| 2026-05-12 | scripts/precompute_r3m.py TASK_LIST | LIBERO-Goal 5-task subset，按动作类型多样性选取：`open_the_top_drawer_and_put_the_bowl_inside_demo`（compound 唯一）、`push_the_plate_to_the_front_of_the_stove_demo`（push 唯一）、`turn_on_the_stove_demo`（turn 唯一）、`put_the_cream_cheese_in_the_bowl_demo`（put into container，区别于 flat surface 放置）、`put_the_wine_bottle_on_top_of_the_cabinet_demo`（高位放置 + 细长物体，grasp 角度难度高于宽底 bowl） | 用户讨论 | 否 |
+| 2026-05-13 | src/models.py FiLM $\gamma$ 初始化 | PyTorch 默认 Kaiming uniform（不采用 c2_plan 中 $\gamma = 0$ 或 $\gamma = 1$ 的常数初始化） | 用户讨论 | 是 |
+| 2026-05-13 | src/models.py time embedding | CFM / DP 共享 `SinusoidalPosEmb` 函数，`max_period = 10000`；DP 端 $t \to t/T \in [0, 1]$ 归一化后送入，CFM 端 $\tau \in [0, 1]$ 直接送入 | 用户讨论 | 否 |

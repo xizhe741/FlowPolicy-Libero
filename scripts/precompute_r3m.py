@@ -166,10 +166,10 @@ if __name__ == "__main__":
     DATA_DIR  = Path("/root/shared-nvme/data/libero_goal")
     CACHE_DIR = Path("/root/shared-nvme/caches/r3m_k8")
     TASK_LIST = [
-        "put_the_bowl_on_the_plate_demo",
-        "put_the_wine_bottle_on_the_rack_demo",
-        "open_the_middle_drawer_of_the_cabinet_demo",
-        "turn_on_the_stove_demo",
         "open_the_top_drawer_and_put_the_bowl_inside_demo",
+        "push_the_plate_to_the_front_of_the_stove_demo",
+        "turn_on_the_stove_demo",
+        "put_the_cream_cheese_in_the_bowl_demo",
+        "put_the_wine_bottle_on_top_of_the_cabinet_demo",
     ]
     main(DATA_DIR, CACHE_DIR, TASK_LIST)
