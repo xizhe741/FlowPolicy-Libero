@@ -73,3 +73,11 @@ tb_logs/
 
 Thumbs.db
 
+# Local-only reference scripts (来自 diffusion_model_from_scratch / stable_diffusion，非 c2 文件树)
+
+src/DiT.py
+
+src/U_net.py
+
+src/modules.py
+
