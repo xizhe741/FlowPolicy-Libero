@@ -275,9 +275,8 @@ def main():
             break
     if task_id is None:
         raise RuntimeError(f"task_name '{cfg.task_name}' 不在 libero_goal task suite")
-    task = task_suite.get_task(task_id)
     env = OffScreenRenderEnv(
-        bddl_file_name=task.bddl_file,
+        bddl_file_name=task_suite.get_task_bddl_file_path(task_id),
         camera_heights=cfg.libero.camera_height,
         camera_widths=cfg.libero.camera_width,
     )
