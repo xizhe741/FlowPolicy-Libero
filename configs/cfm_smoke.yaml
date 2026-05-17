@@ -74,5 +74,5 @@ libero:
 
 wandb:
   project: flow-policy
-  mode: offline                # smoke 不污染 dashboard
+  mode: disabled               # smoke 完全跳过 wandb (不 init, 不写本地 wandb/ 目录)
   run_name: cfm_smoke
