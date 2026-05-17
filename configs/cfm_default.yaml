@@ -5,13 +5,15 @@
 method: cfm
 
 # === 运行实例 (CLI 可 override: --task_name / --seed / --device / --output_dir) ===
-task_name: open_the_top_drawer_and_put_the_bowl_inside_demo
+# task_name 取 LIBERO task suite 原生名(无 _demo 后缀); 数据集文件命名约定 _demo 后缀在
+# train.py hdf5_path 合成 与 data.py load_r3m_cache 内注入.
+task_name: open_the_top_drawer_and_put_the_bowl_inside
 seed: 42
 device: cuda:0
 output_dir: runs/cfm_default
 
 # === 数据路径 ===
-# hdf5_path 不直接给; load_cfg 内合成 f"{hdf5_dir}/{task_name}.hdf5".
+# hdf5_path 不直接给; load_cfg 内合成 f"{hdf5_dir}/{task_name}_demo.hdf5".
 # CLI --task_name override 后 hdf5_path 自动跟随.
 hdf5_dir: /root/shared-nvme/data/libero_goal
 cache_dir: /root/shared-nvme/caches/r3m_k8

@@ -77,9 +77,10 @@ def load_cfg(args):
         if v is not None:
             raw[k] = v
 
-    # hdf5_path 合成: 优先 yaml 显式 hdf5_path; 否则用 hdf5_dir + task_name.
+    # hdf5_path 合成: 优先 yaml 显式 hdf5_path; 否则 hdf5_dir + task_name + _demo 后缀
+    # (task_name 取 LIBERO 原生名; _demo 是 demonstration 数据集的文件命名约定, 在此注入).
     if raw.get("hdf5_path") is None:
-        raw["hdf5_path"] = f"{raw['hdf5_dir']}/{raw['task_name']}.hdf5"
+        raw["hdf5_path"] = f"{raw['hdf5_dir']}/{raw['task_name']}_demo.hdf5"
 
     # spec 改 1: wandb 段 fallback
     raw.setdefault("wandb", {})
