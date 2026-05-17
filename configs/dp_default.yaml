@@ -19,7 +19,7 @@ cache_dir: /root/shared-nvme/caches/r3m_k8
 
 # === DataLoader ===
 batch_size: 96
-num_workers: 4
+num_workers: 16
 
 # === Dataset 形状参数 (plan/c2_plan.md §3.1; decisions row 5/11) ===
 # obs_horizon=2 (T_o) 与 K_aug 不暴露: 前者写死在 data.py __getitem__ /

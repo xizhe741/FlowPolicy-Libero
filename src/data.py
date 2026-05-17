@@ -68,13 +68,16 @@ def preprocess_image(image, augment=False, rng=None, brightness=None, contrast=N
 # ──────────────────────────────────────────
 
 def load_r3m_cache(task_name, cache_dir):
-    """返回 mmap array, shape (N_demos, T_max, 2_views, K_aug, 2048).
+    """返回内存 array, shape (N_demos, T_max, 2_views, K_aug, 2048).
 
     task_name 取 LIBERO 原生名(无 _demo); cache 文件名约定带 _demo 后缀,
     与 scripts/precompute_r3m.py TASK_LIST 元素 (带 _demo) 存盘格式一致.
+
+    一次性 load 进主进程内存(单 task ~1.5G), DataLoader worker fork 后 copy-on-write
+    共享物理页. 之前 mmap_mode="r" 在随机索引模式下触发频繁 page fault, GPU util 仅 20%.
     """
     path = Path(cache_dir) / f"{task_name}_demo_r3m.npy"
-    return np.load(path, mmap_mode="r")
+    return np.load(path)
 
 
 # ──────────────────────────────────────────
@@ -170,6 +173,8 @@ def make_dataloader(task_name, hdf5_path, cache_dir, chunk_horizon,
         num_workers=num_workers,
         pin_memory=True,
         drop_last=True,
+        persistent_workers=True,
+        prefetch_factor=4,
     )
 
 
