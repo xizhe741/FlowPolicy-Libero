@@ -191,6 +191,9 @@ def construct_eval_obs(
 
     返回: obs tensor (8210,) on device. 窗口顺序 (t-1, t)。
     """
+    # r3m_model 加载时 .half() (与 scripts/precompute_r3m.py 一致), 输入 dtype 必须
+    # 对齐 r3m 内部 weights; 输出再 .float() 回 fp32, 与下游 joints/grippers fp32 cat 兼容.
+    r3m_dtype = next(r3m_model.parameters()).dtype
     obs_features = []
     for image_agent, image_wrist, joints, grippers in [
         (image_agent_prev, image_wrist_prev, joints_prev, grippers_prev),
@@ -199,8 +202,8 @@ def construct_eval_obs(
         img_agent = preprocess_image(image_agent, augment=False)
         img_wrist = preprocess_image(image_wrist, augment=False)
         with torch.no_grad():
-            feat_agent = r3m_model(img_agent.unsqueeze(0).to(device))  # (1, 2048)
-            feat_wrist = r3m_model(img_wrist.unsqueeze(0).to(device))
+            feat_agent = r3m_model(img_agent.unsqueeze(0).to(device, dtype=r3m_dtype)).float()  # (1, 2048)
+            feat_wrist = r3m_model(img_wrist.unsqueeze(0).to(device, dtype=r3m_dtype)).float()
         obs_features.append(torch.cat([
             feat_agent.squeeze(0),
             feat_wrist.squeeze(0),
