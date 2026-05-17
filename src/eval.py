@@ -230,11 +230,13 @@ def main():
     # === step 4: R3M ===
     # load_r3m 内部 wrap nn.DataParallel(device_ids=[0]); --device cuda:1 时
     # .to(cuda:1) 后 DataParallel.device_ids[0]=0 与 module 实际 device 不匹配, forward 报错. 解 wrap.
+    # 不调 .half(): R3M.forward (r3m/models/models_r3m.py L99) 内部 `obs = obs.float() / 255.0`
+    # 强制 fp32 输入, 与 fp16 weights 不匹配. eval-time 单 image 不需要 fp16 加速.
     from r3m import load_r3m
     r3m_model = load_r3m("resnet50")
     if hasattr(r3m_model, "module"):
         r3m_model = r3m_model.module
-    r3m_model = r3m_model.to(device).eval().half()
+    r3m_model = r3m_model.to(device).eval()
 
     # === step 5: eval mode ===
     model.eval()
