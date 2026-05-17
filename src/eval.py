@@ -13,6 +13,15 @@ from src.data import Normalizer, construct_eval_obs
 from src.model.ObsEncoder import ObsEncoder
 from src.model.unet1d import ConditionalUnet1D
 
+# torch 2.6+ 把 torch.load weights_only 默认值改成 True, 与 LIBERO 内部
+# get_task_init_states 加载 numpy 数组 / 我们自己 ckpt 嵌 numpy 与 python rng state
+# 均不兼容. 这里恢复旧默认; 仅加载受信本地文件, 不接收外部 ckpt.
+_orig_torch_load = torch.load
+def _torch_load_compat(*args, **kwargs):
+    kwargs.setdefault("weights_only", False)
+    return _orig_torch_load(*args, **kwargs)
+torch.load = _torch_load_compat
+
 
 def rollout(
     model,
