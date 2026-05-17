@@ -7,6 +7,7 @@ src/train.py — CFM / DP 训练入口。
 """
 
 import argparse
+import copy
 import math
 import os
 import random
@@ -294,8 +295,9 @@ def main():
     # === r3m_model (一次性) ===
     r3m_model = load_r3m("resnet50").to(device).eval().half()
 
-    # === normalizer (复用 dataset 内实例, to(device)) ===
-    normalizer = dataloader.dataset.normalizer.to(device)
+    # === normalizer (eval 用 GPU 拷贝; dataset 内实例保持 CPU,
+    # 否则 DataLoader worker fork 后 normalize() 会 cuda/cpu 混算炸掉) ===
+    normalizer = copy.deepcopy(dataloader.dataset.normalizer).to(device)
 
     # === pseudocode § Optimizer / Scheduler ===
     params = list(model.parameters()) + list(obs_encoder.parameters())
