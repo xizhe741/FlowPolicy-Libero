@@ -95,7 +95,7 @@ class ConditionalUnet1D(nn.Module):
 
         # 时间嵌入: sinusoidal -> MLP, 然后 concat obs 作为 condition
         if t.dim() == 0:
-            t = t.unsqueeze(0)
+            t = t.unsqueeze(0)#这个分支只是避免边界情况发生
         elif t.dim() > 1:
             t = t.view(-1)
         if t.shape[0] != x.shape[0]:
