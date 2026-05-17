@@ -80,3 +80,56 @@ def dp_loss(model, a_clean, obs, alpha_bar):
     # MSE, mean over (B, H, d_a) → 0-dim scalar
     return F.mse_loss(z, eps_pred), \
         {"per_sample_loss": persample_loss, "tau": t_norm}
+
+
+def ddim_sample(model, obs, alpha_bar, timesteps, H, d_a):
+    """
+    DDIM deterministic sampler (eta = 0).
+
+    model:      ConditionalUnet1D, forward(a_t, t_norm, obs) -> eps_pred
+                a_t: (B, H, d_a), t_norm: (B,), obs: (B, obs_dim)
+    obs:        (B, 2048) ObsEncoder 输出 (与 dp_loss / cfm_loss / euler_sample 同命名)
+    alpha_bar:  (T,) tensor, squared_cosine_schedule 输出
+                索引 i 对应 physical timestep t = i + 1 (与 dp_loss L33, L67 对齐)
+    timesteps:  1d 整数序列 (Python list 或 0d-int tensor 元素均可), 严格降序
+                caller (infer.py) 决定生成策略:
+                  (a) random subsample: torch.randperm(T)[:16].sort(descending=True)
+                  (b) 全量: list(range(T - 1, -1, -1))
+                长度 = T_infer
+    H, d_a:     chunk horizon, action dim (caller 从 cfg.unet 取, 与 euler_sample 同 idiom)
+    返回:        (B, H, d_a) action chunk in normalized [-1, 1] space
+    """
+    B = obs.shape[0]
+    device = obs.device
+    T = alpha_bar.shape[0]
+    N_steps = len(timesteps)
+
+    # x_T ~ N(0, I)
+    x = torch.randn(B, H, d_a, device=device)
+
+    for i in range(N_steps):
+        t = int(timesteps[i])
+        ab_t = alpha_bar[t]
+
+        # alpha_bar_prev: 最后一步映射回 clean state, 用 1.0 sentinel (HuggingFace
+        # DDIMScheduler 同款逻辑); 否则取 alpha_bar[timesteps[i + 1]]
+        if i == N_steps - 1:
+            ab_prev = torch.tensor(1.0, device=device)
+        else:
+            ab_prev = alpha_bar[int(timesteps[i + 1])]
+
+        # t_norm 与 dp_loss L71 训练对齐: (t + 1) / T ∈ [1/T, 1]
+        t_norm = torch.full((B,), (t + 1) / T, device=device)
+
+        # ε-prediction
+        eps = model(x, t_norm, obs)
+
+        # DDIM deterministic step (eta = 0):
+        #   x0_hat = (x - sqrt(1 - ᾱ_t) · eps) / sqrt(ᾱ_t)
+        #   x_prev = sqrt(ᾱ_prev) · x0_hat + sqrt(1 - ᾱ_prev) · eps
+        x0_hat = (x - torch.sqrt(1 - ab_t) * eps) / torch.sqrt(ab_t)
+        x = torch.sqrt(ab_prev) * x0_hat + torch.sqrt(1 - ab_prev) * eps
+
+    # no clip; rely on denormalize() in data.py at eval time
+    # (与 euler_sample 一致, 保留 raw range 用于 DP/CFM head replacement 诊断)
+    return x
