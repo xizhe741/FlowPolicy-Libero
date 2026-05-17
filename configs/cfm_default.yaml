@@ -19,7 +19,7 @@ hdf5_dir: /root/shared-nvme/data/libero_goal
 cache_dir: /root/shared-nvme/caches/r3m_k8
 
 # === DataLoader ===
-batch_size: 96
+batch_size: 256
 num_workers: 16
 
 # === Dataset 形状参数 (plan/c2_plan.md §3.1; decisions row 5/11) ===
@@ -45,7 +45,7 @@ unet:
 
 # === Optimizer (decisions 2026-05-16 row 37 (1)(2): 与 DP 官方 yaml 一致) ===
 optimizer:
-  lr: 1.0e-4
+  lr: 1.63e-4              # 偏离 decisions row 37(1) 的"与 DP 官方一致 1.0e-4": batch_size 96→256 后按 sqrt(256/96)≈1.633 缩放
   weight_decay: 1.0e-6
 
 # === Scheduler (warmup_steps=500 与 DP 官方一致; cosine to 0) ===
