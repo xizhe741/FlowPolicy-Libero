@@ -46,3 +46,49 @@ def cfm_loss(model, a_clean, obs):
   # MSE, mean over (B, H, d_a) → 0-dim scalar
     return F.mse_loss(v_target, v_pred), \
         {"per_sample_loss": persample_loss, "tau": t}
+
+
+# === euler_sample (append) ===
+# Pseudocode → code mapping:
+#   def euler_sample(...) header  → def euler_sample(model, obs, H, d_a, N=4)
+#   docstring block               → preserved verbatim
+#   B = obs.shape[0]              → B = obs.shape[0]
+#   device = obs.device           → device = obs.device
+#   x = torch.randn(B,H,d_a,...)  → x = torch.randn(B, H, d_a, device=device)
+#   dt = 1.0 / N                  → dt = 1.0 / N
+#   for n in range(N):            → for n in range(N):
+#   tau = torch.full((B,), ...)   → tau = torch.full((B,), n * dt, device=device)
+#   v = model(x, tau, obs)        → v = model(x, tau, obs)
+#   x = x + dt * v                → x = x + dt * v
+#   no clip / ODE ablation cmts   → preserved verbatim above return
+#   return x                      → return x
+
+def euler_sample(model, obs, H, d_a, N=4):
+    """
+    CFM Euler ODE sampler.
+
+    model: ConditionalUnet1D, forward(a_tau, t, obs) -> v_pred
+           a_tau: (B, H, d_a), t: (B,), obs: (B, obs_dim)
+    obs:   (B, 2048) ObsEncoder 输出 (与 cfm_loss 同命名)
+    H:     chunk horizon (caller 从 cfg.unet 或 cfg.data 传入)
+    d_a:   action dim (caller 从 cfg.unet.action_dim 传入)
+    N:     Euler 步数, 默认 4
+    返回:   (B, H, d_a) action chunk in normalized [-1, 1] space
+    """
+    B = obs.shape[0]
+    device = obs.device
+
+    # a_0 ~ N(0, I)
+    x = torch.randn(B, H, d_a, device=device)
+    dt = 1.0 / N
+
+    for n in range(N):
+        # tau 必须是 (B,) tensor — model 主路径要求 (B,) 向量,
+        # unet1d.forward L97-102 的 dim 分支仅做边界 fallback
+        tau = torch.full((B,), n * dt, device=device)
+        v = model(x, tau, obs)
+        x = x + dt * v
+
+    # no clip; rely on denormalize() in data.py at eval time
+    # 保留 raw range 作为 ODE ablation (N=1 vs N=4) 数值误差诊断信号
+    return x
