@@ -78,8 +78,7 @@ def load_r3m_cache(task_name, cache_dir):
 # ──────────────────────────────────────────
 
 class LiberoGoalDataset(Dataset):
-    def __init__(self, task_name, hdf5_path, cache_dir,
-                 chunk_horizon=16, obs_horizon=2, K_aug=8):
+    def __init__(self, task_name, hdf5_path, cache_dir, chunk_horizon):
         super().__init__()
         # 外包段：HDF5 demo 遍历（LIBERO 布局 data/demo_*）+ 原始数组读取
         with h5py.File(hdf5_path, "r") as f:
@@ -107,8 +106,9 @@ class LiberoGoalDataset(Dataset):
         self.total_length = self.cumulative_lengths[-1]
 
         self.H = chunk_horizon
-        self.T_o = obs_horizon
-        self.K = K_aug
+        # K 从 cache 末轴派生, 与 precompute_r3m.py 写盘 shape 一致, 不另作 cfg 旋钮.
+        self.K = self.r3m_cache.shape[3]
+        # obs 窗口固定 2 帧 (prev/curr), 写死在 __getitem__ 与 construct_eval_obs.
 
     def __len__(self):
         return self.total_length
@@ -154,8 +154,9 @@ class LiberoGoalDataset(Dataset):
 # pseudo §5: DataLoader 工厂
 # ──────────────────────────────────────────
 
-def make_dataloader(task_name, hdf5_path, cache_dir, batch_size=96, num_workers=4):
-    dataset = LiberoGoalDataset(task_name, hdf5_path, cache_dir)
+def make_dataloader(task_name, hdf5_path, cache_dir, chunk_horizon,
+                    batch_size=96, num_workers=4):
+    dataset = LiberoGoalDataset(task_name, hdf5_path, cache_dir, chunk_horizon)
     return DataLoader(
         dataset,
         batch_size=batch_size,
@@ -170,19 +171,22 @@ def make_dataloader(task_name, hdf5_path, cache_dir, batch_size=96, num_workers=
 # pseudo §6: Eval-time obs 构造（共用 preprocess_image，无增强）
 # ──────────────────────────────────────────
 
-def construct_eval_obs(images_current, images_prev, joints_current, joints_prev,
-                       grippers_current, grippers_prev, r3m_model, device):
-    """images_*: dict with "agentview" 与 "eye_in_hand"，每张 (H, W, 3) uint8.
+def construct_eval_obs(
+    image_agent_current, image_wrist_current, joints_current, grippers_current,
+    image_agent_prev,    image_wrist_prev,    joints_prev,    grippers_prev,
+    r3m_model, device,
+):
+    """image_*_*: (H, W, 3) uint8 ndarray，agentview / eye_in_hand 各两个时间步.
 
     返回: obs tensor (8210,) on device. 窗口顺序 (t-1, t)。
     """
     obs_features = []
-    for images, joints, grippers in [
-        (images_prev, joints_prev, grippers_prev),
-        (images_current, joints_current, grippers_current),
+    for image_agent, image_wrist, joints, grippers in [
+        (image_agent_prev, image_wrist_prev, joints_prev, grippers_prev),
+        (image_agent_current, image_wrist_current, joints_current, grippers_current),
     ]:
-        img_agent = preprocess_image(images["agentview"], augment=False)
-        img_wrist = preprocess_image(images["eye_in_hand"], augment=False)
+        img_agent = preprocess_image(image_agent, augment=False)
+        img_wrist = preprocess_image(image_wrist, augment=False)
         with torch.no_grad():
             feat_agent = r3m_model(img_agent.unsqueeze(0).to(device))  # (1, 2048)
             feat_wrist = r3m_model(img_wrist.unsqueeze(0).to(device))
