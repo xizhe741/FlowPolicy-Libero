@@ -134,7 +134,9 @@ class LiberoGoalDataset(Dataset):
             joint = self.joints[demo_id][tau]
             gripper = self.grippers[demo_id][tau]
             obs_features.append(np.concatenate([feat_agent, feat_wrist, joint, gripper]))
-        obs = np.concatenate(obs_features)  # (8210,)
+        # HDF5 中 joint_states / gripper_states 默认 float64, concat 会把 R3M 的 float32
+        # 一起 promote 到 float64, 进入 bf16 autocast 的 Linear 会触发 dtype mismatch.
+        obs = np.concatenate(obs_features).astype(np.float32)  # (8210,)
 
         # 3. action chunk + 末端 hold pose padding
         action_chunk = torch.zeros(self.H, 7)
