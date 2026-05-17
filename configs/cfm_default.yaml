@@ -1,1 +1,96 @@
-# TODO: see c2_plan.md §3.4, §5 — CFM default config
+# CFM 默认配置 — LIBERO-Goal 5-task subset, C2 reproduction.
+# 与 plan/c2_plan.md (设计层) + plan/c2_coding_plan.md (代码实施层) 配对.
+# 字段右注: → decisions row N 指 notes/decisions.md 对应行.
+
+method: cfm
+
+# === 运行实例 (CLI 可 override: --task_name / --seed / --device / --output_dir) ===
+task_name: open_the_top_drawer_and_put_the_bowl_inside_demo
+seed: 42
+device: cuda:0
+output_dir: runs/cfm_default
+
+# === 数据路径 ===
+# hdf5_path 不直接给; load_cfg 内合成 f"{hdf5_dir}/{task_name}.hdf5".
+# CLI --task_name override 后 hdf5_path 自动跟随.
+hdf5_dir: /root/shared-nvme/data/libero_goal
+cache_dir: /root/shared-nvme/caches/r3m_k8
+
+# === DataLoader ===
+batch_size: 96
+num_workers: 4
+
+# === Dataset 形状参数 (plan/c2_plan.md §3.1; decisions row 5/11) ===
+# obs_horizon=2 (T_o) 与 K_aug 不暴露: 前者写死在 data.py __getitem__ /
+# construct_eval_obs 的 prev+curr 2 帧逻辑; 后者由 r3m_cache.shape[3] 派生.
+data:
+  chunk_horizon: 16        # H
+
+# === ObsEncoder (decisions 2026-05-13 row 21 锁定) ===
+obs_encoder:
+  num_blocks: 3
+  num_heads: 4
+  mlp_ratio: 4
+  dim: 256
+
+# === ConditionalUnet1D ===
+unet:
+  action_dim: 7
+  obs_dim: 2048            # 必须 == 8 * obs_encoder.dim, train.py L64 assert
+  embedded_dim: 256        # time embedding 维, decisions 2026-05-13 row 20
+  down_dims: [128, 256, 512]
+  kernel_size: 5
+
+# === Optimizer (decisions 2026-05-16 row 37 (1)(2): 与 DP 官方 yaml 一致) ===
+optimizer:
+  lr: 1.0e-4
+  weight_decay: 1.0e-6
+
+# === Scheduler (warmup_steps=500 与 DP 官方一致; cosine to 0) ===
+scheduler:
+  warmup_steps: 500        # decisions 2026-05-16 row 37 (2)
+  epoch_max: 200           # decisions 2026-05-14 row 23
+
+# === EMA (decisions 2026-05-14 row 32) ===
+ema:
+  decay: 0.9997
+
+# === Train logging / hygiene ===
+train:
+  grad_clip_norm: 1.0      # decisions 2026-05-16 row 37 (3); 非 DP 默认, 用户自加
+  log_interval: 6          # decisions 2026-05-14 row 36
+  tau_buckets: 10          # decisions 2026-05-16 row 37 (4)
+
+# === Loss EMA (decisions 2026-05-14 row 24) ===
+loss_ema:
+  alpha: 0.95
+
+# === Early stopping (decisions 2026-05-14 row 23/25/27) ===
+early_stop:
+  phase1_min_epoch: 20     # phase 1 plateau 判定门槛, t<20 不启动
+  plateau_window: 20       # loss_ema 相对降幅窗口长 (epoch)
+  plateau_threshold: 0.02  # 窗口相对降幅 < 此值 → 切 phase 2
+  phase2_eval_interval: 20 # phase 2 每 N epoch 调用一次训练中 evaluate
+  eval_episodes: 20        # 每次训练中 evaluate 跑多少 episode
+  patience: 2              # SR 连续未上升次数上限
+
+# === Inference (采样步数 + receding horizon stride) ===
+infer:
+  N: 4                     # CFM Euler ODE 步数; DP 路径忽略此字段
+  T_infer: 16              # DP DDIM 推理步数; CFM 路径忽略此字段
+  action_steps: 8          # receding horizon stride: rollout 内每 N 步重规划; 与 chunk_horizon 解耦
+
+# === Eval (rollout / episode-level 配置) ===
+eval:
+  max_steps: 300           # 单 episode 上限步数; decisions 2026-05-17 row 42
+
+# === LIBERO env (OffScreenRenderEnv camera 参数) ===
+libero:
+  camera_height: 128
+  camera_width: 128
+
+# === wandb (load_cfg 内 null fallback: run_name → f"{method}_{task_name}_seed{seed}") ===
+wandb:
+  project: flow-policy
+  mode: online
+  run_name: null
