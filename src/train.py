@@ -293,7 +293,12 @@ def main():
     init_states_all = task_suite.get_task_init_states(task_id)
 
     # === r3m_model (一次性) ===
-    r3m_model = load_r3m("resnet50").to(device).eval().half()
+    # load_r3m 内部 wrap nn.DataParallel(device_ids=[0]); seed!=42 跑 cuda:1 时
+    # .to(cuda:1) 后 DataParallel.device_ids[0]=0 与 module 实际 device 不匹配, forward 报错. 解 wrap.
+    r3m_model = load_r3m("resnet50")
+    if hasattr(r3m_model, "module"):
+        r3m_model = r3m_model.module
+    r3m_model = r3m_model.to(device).eval().half()
 
     # === normalizer (eval 用 GPU 拷贝; dataset 内实例保持 CPU,
     # 否则 DataLoader worker fork 后 normalize() 会 cuda/cpu 混算炸掉) ===

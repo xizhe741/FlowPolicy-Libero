@@ -228,8 +228,13 @@ def main():
     normalizer.load_state_dict(ckpt["normalizer_state"])
 
     # === step 4: R3M ===
+    # load_r3m 内部 wrap nn.DataParallel(device_ids=[0]); --device cuda:1 时
+    # .to(cuda:1) 后 DataParallel.device_ids[0]=0 与 module 实际 device 不匹配, forward 报错. 解 wrap.
     from r3m import load_r3m
-    r3m_model = load_r3m("resnet50").to(device).eval().half()
+    r3m_model = load_r3m("resnet50")
+    if hasattr(r3m_model, "module"):
+        r3m_model = r3m_model.module
+    r3m_model = r3m_model.to(device).eval().half()
 
     # === step 5: eval mode ===
     model.eval()
