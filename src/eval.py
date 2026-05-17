@@ -38,8 +38,7 @@ def rollout(
 ) -> dict:
 
     env.reset()
-    env.set_init_state(init_state)
-    obs_raw = env._get_observations()
+    obs_raw = env.set_init_state(init_state)
 
     image_agent_curr = obs_raw["agentview_image"]
     image_wrist_curr = obs_raw["robot0_eye_in_hand_image"]
