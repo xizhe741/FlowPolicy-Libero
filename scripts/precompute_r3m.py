@@ -56,8 +56,7 @@ def r3m_forward(
     # 输入: fp32 cpu, shape (3, 224, 224), 值域 [0, 255]
     # R3M.forward 内部: obs/255 -> ImageNet normalize -> ResNet50
     batch = torch.stack(batch_imgs).cuda(non_blocking=True).half()
-    with torch.amp.autocast('cuda', dtype=torch.float16):
-        feats = r3m(batch)                              # (B, 2048)
+    feats = r3m(batch)                              # (B, 2048)
     return feats.float().cpu().numpy().astype(CACHE_DTYPE)
 
 
