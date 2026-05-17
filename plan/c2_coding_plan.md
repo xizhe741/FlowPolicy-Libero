@@ -49,26 +49,51 @@
 
 ---
 
-### `src/models.py`
+### `src/model/modules.py`
 
-**功能**：CFM 与 DP 共享的 1D Temporal U-Net。sinusoidal time embedding → condition MLP → FiLMResBlock1D × (4 down + bottleneck + 4 up + skip) → 输出 $v_\theta \in \mathbb{R}^{B \times H \times d_a}$。
+**功能**：1D U-Net 子模块。`sinusoidal_embedding`（time → 位置编码）、`FiLMResBlock1D`（Conv→GN→Mish → FiLM scale/bias → Conv→GN→Mish + residual）、`Downsample1d`、`Upsample1d`。
 
 **待决策项**：
 
-1. FiLM $\gamma$ 初始化为 0 还是 1。
-2. Time embedding 是否 CFM / DP 共享；涉及 max period 选择。
+1. FiLM $\gamma$ 初始化选择。
 
-**高价值代码（你写伪代码）**：FiLMResBlock1D（含 FiLM affine、GroupNorm、残差连接）。condition MLP（time embedding + obs → $c$）。U-Net 主类 forward。
+**高价值代码（你写伪代码）**：`FiLMResBlock1D`（含 FiLM affine、GroupNorm、残差连接）。
 
 **外包代码**：
 
-- 完全外包：sinusoidal embedding 函数（标准公式）。上采样 / 下采样模块的 conv 配置。skip connection concat + 1×1 conv。
+- 完全外包：sinusoidal embedding 函数（标准公式）。上采样 / 下采样模块的 conv 配置。
 - 生疏内容：GroupNorm 的 `num_groups` 参数语义。`nn.Conv1d` 的 padding mode。
 
 **决策经验来源**：
 
 - $\gamma$ 初始化 → π₀ 与 DP 官方实现中的具体选择。
+
+---
+
+### `src/model/unet1d.py`
+
+**功能**：`ConditionalUnet1D`，CFM 与 DP 共享的 1D Temporal U-Net backbone。time_mlp(sinusoidal(t)) ⊕ obs → condition；3-level encoder + bottleneck + 2-level decoder（skip[0] 不消费，DP 一致）→ $v_\theta \in \mathbb{R}^{B \times H \times d_a}$。
+
+**待决策项**：
+
+1. Time embedding 是否 CFM / DP 共享；涉及 max period 选择。
+
+**高价值代码（你写伪代码）**：U-Net 主类 forward。condition MLP（time embedding + obs → $c$）。
+
+**外包代码**：
+
+- 完全外包：encoder/decoder/bottleneck 的 FiLMResBlock1D 堆叠 pattern；skip connection concat；final Conv1dBlock + 1×1 Conv1d。
+- 生疏内容：DP 官方 `ConditionalUnet1D` 的 skip 数与 Upsample/Identity 配比。
+
+**决策经验来源**：
+
 - Time embedding max period → Diffusion Policy 官方 repo 中的值；如果 CFM / DP 共享，需确认 DP 把 $t/T$ 归一化到 $[0,1]$ 后与 CFM 的 $\tau \in [0,1]$ 走同一个 embedding 是否合理。
+
+---
+
+### `src/model/ObsEncoder.py`
+
+<!-- TODO: 用户自加。参考 notes/decisions.md 2026-05-13 第三行记录。 -->
 
 ---
 
@@ -100,33 +125,35 @@
 
 **待决策项**：
 
-1. $\bar\alpha_t$ 序列预计算 `register_buffer` 还是动态索引。
+1. $\bar\alpha_t$ 存储方案：(a) `register_buffer` 嵌入 `dp.py` 模型类、(b) 动态索引在 forward 内计算、(c) `dp.py` 出 `squared_cosine_schedule(T)` 工具函数，`train.py` 持有 tensor 并作为 `dp_loss` / sampler 形参传入。
 2. DDIM $\eta$ 取值（$\eta = 0$ 确定性 vs $\eta > 0$ 随机）。
 3. `dp_loss` 返回 scalar 还是 per-sample $(B,)$（与 `cfm_loss` 保持一致）。
+4. DDIM `ddim_sample` `timesteps` 子采样策略：`ddim_sample` 由 caller 传入严格降序整数序列，长度 $= T_{\text{infer}}$。caller 须在 (a) HuggingFace `DDIMScheduler` leading spacing / (b) trailing spacing / (c) linspace / (d) random subsample / (e) 全量降序 中选定。
 
-**高价值代码（你写伪代码）**：无。DP 是对比组，设计标准是"与 DP 官方实现严格一致"，独创性是负面贡献。
+**高价值代码（你写伪代码）**：`dp_loss` 函数体。理由：与 `cfm_loss` 对称的 return-format、model-signature、$t$ 归一化约定需在伪代码层显式锁定，避免外包实现偏离对称性。`squared_cosine_schedule` 与 DDIM sampler 仍外包。
 
 **外包代码**：
 
-- 完全外包：整个文件。
+- 完全外包：`squared_cosine_schedule` 函数（IDDPM §3.2 标准公式）、DDIM sampler。
 - 生疏内容：squared cosine schedule 的公式推导（IDDPM 论文 §3.2），DDIM 的 reverse process 推导（DDIM 论文 §4.1）。理解这两项使你在 head replacement 对比中能解释 DP 端的行为。
 
 **决策经验来源**：
 
-- 全部从 Diffusion Policy 官方 repo 复制选择。$\eta$、schedule 类型、$T$ 值不另改动。
+- `squared_cosine_schedule` 与 DDIM sampler：从 Diffusion Policy 官方 repo 复制选择。$\eta$、schedule 类型、$T$ 值不另改动。
+- `dp_loss` 对称约定（return scalar、$t/T$ 归一化、`alpha_bar` 形参传入）：与 `cfm_loss` 联合决策，记入 `notes/decisions.md`。
 
 ---
 
 ### `src/train.py`
 
-**功能**：训练入口。config 加载 → model / optimizer / scheduler 实例化 → 训练主循环（forward → loss → backward → grad clip → EMA update）→ quick eval 触发 → 早停 → checkpoint 保存。
+**功能**：训练入口。config 加载 → model / optimizer / scheduler 实例化 → 训练主循环（forward → loss → backward → grad clip → EMA update）→ 训练中 evaluate 触发 → 早停 → checkpoint 保存。
 
 **待决策项**：
 
 1. EMA 在 bf16 训练下是否用 fp32 累计。
 2. 早停中"不下降"的判定：严格大于还是大于等于。
 3. Warmup 期间（前 500 步）是否启用 EMA update。
-4. Best checkpoint 选择依据：quick eval success rate 还是 training loss。
+4. Best checkpoint 选择依据：训练中 evaluate success rate 还是 training loss。
 
 **高价值代码（你写伪代码）**：训练主循环中 loss 调用 → backward → grad clip → EMA update → 早停 state machine 的逻辑流。
 
@@ -138,7 +165,7 @@
 **决策经验来源**：
 
 - EMA fp32 累计 → PyTorch EMA 标准实现（`torch.optim.swa_utils.AveragedModel` 或手写 shadow copy），查 DP 官方 repo 的写法。
-- 早停规则 → 微观实验：拿 1–2 个 task 训练时观察 quick eval success rate 曲线的 plateau 行为，再决定 tie-breaking 规则。
+- 早停规则 → 已锁定（见 `notes/decisions.md` row 23–25 / 27 / 29 / 34）；首轮训练后若需调整，改 cfg `early_stop.*` 字段。
 
 ---
 
@@ -151,7 +178,7 @@
 1. Eval-time obs 构造与 train-time 共用一个函数（`data.py` 给统一接口）还是 eval 独立实现。
 2. Episode 最大步数上限（如 300 或 400）。
 3. Success 判定：直接信任 LIBERO `info['success']` 还是额外 sanity check。
-4. Quick eval 与 full eval 的起始状态种子是否重叠。
+4. 训练中 evaluate 与训练后 evaluate 的起始状态种子是否重叠。
 
 **高价值代码（你写伪代码）**：episode rollout 循环（obs 构造 → 推理调用 → action 反归一化 → receding horizon 执行 → done/success 判定）。这段是 train 与 eval 的 data flow 对齐点。
 
