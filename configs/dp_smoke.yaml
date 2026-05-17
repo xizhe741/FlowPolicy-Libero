@@ -1,0 +1,81 @@
+# DP smoke test 配置 — 仅用于 5-10 分钟内验证整个 pipeline 不挂.
+# 跟 dp_default.yaml 差异: warmup / epoch_max / early_stop / eval 全部缩到最小,
+# 强制立即触发 phase 2 eval, 覆盖 phase1→plateau→phase2→rollout→ckpt save 全路径.
+# 训练效果无意义, 不要拿 loss 数值或 success rate 作判断.
+
+method: dp
+
+task_name: open_the_top_drawer_and_put_the_bowl_inside
+seed: 42
+device: cuda:1
+output_dir: runs/dp_smoke
+
+hdf5_dir: /root/shared-nvme/data/libero_goal
+cache_dir: /root/shared-nvme/caches/r3m_k8
+
+batch_size: 256
+num_workers: 16
+
+data:
+  chunk_horizon: 16
+
+obs_encoder:
+  num_blocks: 3
+  num_heads: 4
+  mlp_ratio: 4
+  dim: 256
+
+unet:
+  action_dim: 7
+  obs_dim: 2048
+  embedded_dim: 256
+  down_dims: [128, 256, 512]
+  kernel_size: 5
+
+dp:
+  T: 100
+
+optimizer:
+  lr: 1.63e-4
+  weight_decay: 1.0e-6
+
+# === Smoke override: 极短训练强制立即进 phase 2 ===
+scheduler:
+  warmup_steps: 5
+  epoch_max: 3
+
+ema:
+  decay: 0.9997
+
+train:
+  grad_clip_norm: 1.0
+  log_interval: 1
+  tau_buckets: 10
+
+loss_ema:
+  alpha: 0.95
+
+early_stop:
+  phase1_min_epoch: 1
+  plateau_window: 1
+  plateau_threshold: 10.0
+  phase2_eval_interval: 1
+  eval_episodes: 2
+  patience: 1
+
+infer:
+  N: 4
+  T_infer: 16
+  action_steps: 8
+
+eval:
+  max_steps: 30
+
+libero:
+  camera_height: 128
+  camera_width: 128
+
+wandb:
+  project: flow-policy
+  mode: offline
+  run_name: dp_smoke
