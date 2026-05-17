@@ -21,12 +21,14 @@ from torch.nn.utils import clip_grad_norm_
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import LambdaLR
 
-from src.cfm import cfm_loss
 from src.data import make_dataloader
-from src.dp import dp_loss, squared_cosine_schedule
-from src.eval import quick_eval
+from src.eval import evaluate
 from src.model.ObsEncoder import ObsEncoder
 from src.model.unet1d import ConditionalUnet1D
+
+from libero.libero import benchmark as libero_benchmark
+from libero.libero.envs import OffScreenRenderEnv
+from r3m import load_r3m
 
 
 # === pseudocode § CLI ===
@@ -48,17 +50,43 @@ def _dict_to_ns(d):
 
 def load_cfg(args):
     # yaml 加载 + CLI override 合并 (pseudocode §"完全外包，yaml schema 由 executor 设计")
-    # cfg 必含字段 (pseudocode §"cfg 必含字段（最小集）"):
-    #   method, task_name, seed, device, output_dir,
-    #   hdf5_path, cache_dir, batch_size, num_workers,
-    #   unet.{action_dim, obs_dim, embedded_dim, down_dims, kernel_size},
+    # cfg 必含字段（按 train.py 实际依赖枚举，wandb.* 有 fallback 可省略）:
+    #   顶层:
+    #     method, task_name, seed, device, output_dir,
+    #     hdf5_path (或 hdf5_dir，二选一), cache_dir, batch_size, num_workers
+    #   unet.{action_dim, obs_dim, embedded_dim, down_dims, kernel_size}
     #   obs_encoder.{num_blocks, num_heads, mlp_ratio, dim}
+    #   data.{chunk_horizon}
+    #   infer.{N, T_infer, action_steps}
+    #   dp.{T}                     # 仅 method == "dp" 必需
+    #   libero.{camera_height, camera_width}
+    #   optimizer.{lr, weight_decay}
+    #   scheduler.{epoch_max, warmup_steps}
+    #   train.{grad_clip_norm, log_interval, tau_buckets}
+    #   ema.{decay}
+    #   loss_ema.{alpha}
+    #   early_stop.{phase1_min_epoch, plateau_window, plateau_threshold,
+    #               phase2_eval_interval, eval_episodes, patience}
+    #   eval.{max_steps}
+    #   wandb.{project, run_name, mode}   # 缺省由本函数 fallback 填充
+    # 约束: unet.obs_dim == 8 * obs_encoder.dim
     with open(args.config, "r") as f:
         raw = yaml.safe_load(f)
     for k in ("task_name", "seed", "device", "output_dir"):
         v = getattr(args, k)
         if v is not None:
             raw[k] = v
+
+    # hdf5_path 合成: 优先 yaml 显式 hdf5_path; 否则用 hdf5_dir + task_name.
+    if raw.get("hdf5_path") is None:
+        raw["hdf5_path"] = f"{raw['hdf5_dir']}/{raw['task_name']}.hdf5"
+
+    # spec 改 1: wandb 段 fallback
+    raw.setdefault("wandb", {})
+    raw["wandb"].setdefault("project", "flow-policy")
+    raw["wandb"].setdefault("mode", "online")
+    if raw["wandb"].get("run_name") is None:
+        raw["wandb"]["run_name"] = f"{raw['method']}_{raw['task_name']}_seed{raw['seed']}"
     cfg = _dict_to_ns(raw)
     # pseudocode §"约束：unet.obs_dim == 8 * obs_encoder.dim"
     assert cfg.unet.obs_dim == 8 * cfg.obs_encoder.dim, (
@@ -89,9 +117,22 @@ def ema_update(shadow_dict, online_module, decay):
         shadow_val.mul_(decay).add_(online_val, alpha=1.0 - decay)
 
 
-# === pseudocode § Helpers: quick_eval_with_ema ===
-def quick_eval_with_ema(model, obs_encoder, ema_shadow_model, ema_shadow_obs_encoder,
-                        task_name, seed, n_episodes):
+# === pseudocode § Helpers: evaluate_with_ema ===
+def evaluate_with_ema(
+    model, obs_encoder,
+    ema_shadow_model, ema_shadow_obs_encoder,
+    env, init_states_all, infer_fn, normalizer, r3m_model, device,
+    n_episodes, seed_for_eval, max_steps, action_steps,
+):
+    """EMA shadow 加载 → 从 init_states_all 中抽样 n_episodes 条 init_state → 调 evaluate → 恢复 online 权重.
+
+    抽样职责划分:
+        上游 caller (train.py main() 内 phase 2 quick eval 与 final fallback eval 两处)
+        负责传入完整 init_states_all (len=N_all=50) 与 seed_for_eval.
+        本函数 evaluate_with_ema 负责用 np.random.RandomState(seed_for_eval).choice
+        从 init_states_all 中无放回抽取 n_episodes 条 init_state, 再交给 src.eval.evaluate
+        (其形参 init_states_for_episodes 假定 caller 侧 (即本函数) 已完成抽样).
+    """
     online_state = {k: v.clone() for k, v in model.state_dict().items()
                     if k in ema_shadow_model}
     online_obs_state = {k: v.clone() for k, v in obs_encoder.state_dict().items()
@@ -101,7 +142,17 @@ def quick_eval_with_ema(model, obs_encoder, ema_shadow_model, ema_shadow_obs_enc
         obs_encoder.load_state_dict(ema_shadow_obs_encoder, strict=False)
         model.eval()
         obs_encoder.eval()
-        result = quick_eval(model, obs_encoder, task_name, seed, n_episodes)
+
+        idx = np.random.RandomState(seed_for_eval).choice(
+            len(init_states_all), n_episodes, replace=False
+        )
+        init_states_for_episodes = init_states_all[idx]
+        result = evaluate(
+            model, obs_encoder, env, init_states_for_episodes,
+            infer_fn, normalizer, r3m_model, device,
+            collect_failure_videos=False,
+            max_steps=max_steps, action_steps=action_steps,
+        )
     finally:
         model.load_state_dict(online_state, strict=False)
         obs_encoder.load_state_dict(online_obs_state, strict=False)
@@ -190,25 +241,59 @@ def main():
         dim=cfg.obs_encoder.dim,
     ).to(device)
 
+    H, d_a = cfg.data.chunk_horizon, cfg.unet.action_dim
     if cfg.method == "cfm":
+        from src.cfm import cfm_loss, euler_sample
         loss_fn = lambda m, a, o: cfm_loss(m, a, o)
+        infer_fn = lambda m, o: euler_sample(m, o, H, d_a, N=cfg.infer.N)
     else:
-        alpha_bar = squared_cosine_schedule(T=100).to(device)
+        from src.dp import dp_loss, ddim_sample, squared_cosine_schedule
+        alpha_bar = squared_cosine_schedule(T=cfg.dp.T).to(device)
+        T, T_infer = alpha_bar.shape[0], cfg.infer.T_infer
+        # HuggingFace DDIMScheduler leading spacing, steps_offset=0 (decisions.md 2026-05-17 row 43)
+        step_ratio = T // T_infer
+        timesteps = (torch.arange(0, T_infer) * step_ratio).flip(0).tolist()
         loss_fn = lambda m, a, o: dp_loss(m, a, o, alpha_bar)
+        infer_fn = lambda m, o: ddim_sample(m, o, alpha_bar, timesteps, H, d_a)
 
     dataloader = make_dataloader(
-        cfg.task_name, cfg.hdf5_path, cfg.cache_dir,
+        cfg.task_name, cfg.hdf5_path, cfg.cache_dir, cfg.data.chunk_horizon,
         batch_size=cfg.batch_size, num_workers=cfg.num_workers,
     )
     # pseudocode §"normalizer 在 dataset 上，state_dict() 提取一次（统计量训练全程不变）"
     normalizer_state = dataloader.dataset.normalizer.state_dict()
 
+    # === LIBERO env / init_states_all (一次性, 给 evaluate_with_ema 复用) ===
+    # NOTE: LIBERO API 模板与 src/eval.py main 内一致; 若与本机版本不符调整
+    benchmark_dict = libero_benchmark.get_benchmark_dict()
+    task_suite = benchmark_dict["libero_goal"]()
+    task_id = None
+    for i in range(task_suite.n_tasks):
+        if task_suite.get_task(i).name == cfg.task_name:
+            task_id = i
+            break
+    if task_id is None:
+        raise RuntimeError(f"task_name '{cfg.task_name}' 不在 libero_goal task suite")
+    task = task_suite.get_task(task_id)
+    env = OffScreenRenderEnv(
+        bddl_file_name=task.bddl_file,
+        camera_heights=cfg.libero.camera_height,
+        camera_widths=cfg.libero.camera_width,
+    )
+    init_states_all = task_suite.get_task_init_states(task_id)
+
+    # === r3m_model (一次性) ===
+    r3m_model = load_r3m("resnet50").to(device).eval().half()
+
+    # === normalizer (复用 dataset 内实例, to(device)) ===
+    normalizer = dataloader.dataset.normalizer.to(device)
+
     # === pseudocode § Optimizer / Scheduler ===
     params = list(model.parameters()) + list(obs_encoder.parameters())
-    optimizer = AdamW(params, lr=1e-4, weight_decay=1e-6)
-    total_steps = 200 * len(dataloader)
+    optimizer = AdamW(params, lr=cfg.optimizer.lr, weight_decay=cfg.optimizer.weight_decay)
+    total_steps = cfg.scheduler.epoch_max * len(dataloader)
     scheduler = cosine_schedule_with_warmup(
-        optimizer, num_warmup_steps=500, num_training_steps=total_steps,
+        optimizer, num_warmup_steps=cfg.scheduler.warmup_steps, num_training_steps=total_steps,
     )
 
     # === pseudocode § EMA shadow (fp32; 覆盖 model + obs_encoder) ===
@@ -223,15 +308,12 @@ def main():
         if v.dtype.is_floating_point
     }
 
-    EMA_DECAY = 0.9997           # pseudocode row 32 (2026-05-14)
-    WARMUP_STEPS = 500
-    LOG_INTERVAL = 6             # pseudocode row 36 (用户自设计)
-    PLATEAU_THRESHOLD = 0.02     # pseudocode row 25 (2026-05-14)
-
     # === pseudocode § wandb ===
+    # spec 改 2: wandb.init 改用 cfg.wandb
     wandb.init(
-        project="flow-policy",
-        name=f"{cfg.method}_{cfg.task_name}_seed{cfg.seed}",
+        project=cfg.wandb.project,
+        name=cfg.wandb.run_name,
+        mode=cfg.wandb.mode,
         config=cfg.__dict__,
     )
 
@@ -246,7 +328,7 @@ def main():
     last_idx = 0
 
     # === pseudocode § Main loop ===
-    for epoch in range(200):
+    for epoch in range(cfg.scheduler.epoch_max):
         epoch_loss_sum = 0.0
         model.train()
         obs_encoder.train()
@@ -263,20 +345,20 @@ def main():
 
             optimizer.zero_grad(set_to_none=True)
             loss.backward()                                  # fp32 梯度
-            grad_norm = clip_grad_norm_(params, 1.0)
+            grad_norm = clip_grad_norm_(params, cfg.train.grad_clip_norm)
 
-            if global_step % LOG_INTERVAL == 0:
+            if global_step % cfg.train.log_interval == 0:
                 params_before = torch.cat([p.detach().flatten() for p in params])
 
             optimizer.step()                                  # fp32 AdamW
             scheduler.step()                                  # per-step
 
-            if global_step >= WARMUP_STEPS:
-                ema_update(ema_shadow_model, model, EMA_DECAY)
-                ema_update(ema_shadow_obs_encoder, obs_encoder, EMA_DECAY)
+            if global_step >= cfg.scheduler.warmup_steps:
+                ema_update(ema_shadow_model, model, cfg.ema.decay)
+                ema_update(ema_shadow_obs_encoder, obs_encoder, cfg.ema.decay)
 
-            # === pseudocode § per-LOG_INTERVAL logging ===
-            if global_step % LOG_INTERVAL == 0:
+            # === pseudocode § per-log_interval logging ===
+            if global_step % cfg.train.log_interval == 0:
                 params_after = torch.cat([p.detach().flatten() for p in params])
                 step_norm = (params_after - params_before).norm().item()
                 shadow_norm = (
@@ -297,7 +379,7 @@ def main():
 
                 tau = aux["tau"]
                 per_sample_loss = aux["per_sample_loss"]
-                buckets = 10
+                buckets = cfg.train.tau_buckets
                 bucket_idx = (tau * buckets).long().clamp(0, buckets - 1)
                 for b in range(buckets):
                     mask = bucket_idx == b
@@ -311,7 +393,7 @@ def main():
 
         # === pseudocode § Epoch end ===
         epoch_loss_mean = epoch_loss_sum / len(dataloader)
-        loss_ema = epoch_loss_mean if loss_ema is None else 0.95 * loss_ema + 0.05 * epoch_loss_mean
+        loss_ema = epoch_loss_mean if loss_ema is None else cfg.loss_ema.alpha * loss_ema + (1 - cfg.loss_ema.alpha) * epoch_loss_mean
         loss_ema_history.append(loss_ema)
 
         wandb.log({
@@ -333,31 +415,35 @@ def main():
         last_idx = 1 - last_idx
 
         # === pseudocode § Phase 1: plateau detection ===
-        if phase == 1 and epoch >= 20:
-            denom = loss_ema_history[epoch - 20]
+        if phase == 1 and epoch >= cfg.early_stop.phase1_min_epoch:
+            denom = loss_ema_history[epoch - cfg.early_stop.plateau_window]
             relative_drop = (denom - loss_ema) / denom
-            if relative_drop < PLATEAU_THRESHOLD:
+            if relative_drop < cfg.early_stop.plateau_threshold:
                 phase = 2
-                last_eval_epoch = epoch - 20  # 切换当 epoch 立即触发首次 quick eval
+                last_eval_epoch = epoch - cfg.early_stop.plateau_window  # 切换当 epoch 立即触发首次训练中 evaluate
 
-        # === pseudocode § Phase 2: quick eval + early stop ===
-        if phase == 2 and (epoch - last_eval_epoch) >= 20:
-            result = quick_eval_with_ema(
+        # === pseudocode § Phase 2: 训练中 evaluate + early stop ===
+        if phase == 2 and (epoch - last_eval_epoch) >= cfg.early_stop.phase2_eval_interval:
+            result = evaluate_with_ema(
                 model, obs_encoder,
                 ema_shadow_model, ema_shadow_obs_encoder,
-                task_name=cfg.task_name, seed=cfg.seed, n_episodes=20,
+                env, init_states_all, infer_fn, normalizer, r3m_model, device,
+                n_episodes=cfg.early_stop.eval_episodes, seed_for_eval=epoch,
+                max_steps=cfg.eval.max_steps, action_steps=cfg.infer.action_steps,
             )
-            sr = result["sr"]
+            sr = result["success_rate"]
             last_eval_epoch = epoch
 
-            succ_lengths = [l for l, s in zip(result["episode_lengths"], result["successes"]) if s]
+            successes = [m["terminate_reason"] == "success" for m in result["episode_metadata"]]
+            episode_lengths = [m["episode_length"] for m in result["episode_metadata"]]
+            succ_lengths = [l for l, s in zip(episode_lengths, successes) if s]
             wandb.log({
                 "eval/quick_sr": sr,
                 "eval/best_sr": best_sr,
                 "eval/stale_count": stale_count,
                 "eval/episode_length_mean": float(np.mean(succ_lengths)) if succ_lengths else 0.0,
                 "eval/sr_per_episode": wandb.Histogram(
-                    np.array([float(s) for s in result["successes"]])
+                    np.array([float(s) for s in successes])
                 ),
             }, step=global_step)
 
@@ -374,16 +460,20 @@ def main():
             else:
                 stale_count += 1
 
-            if stale_count >= 2:
+            if stale_count >= cfg.early_stop.patience:
                 break
 
     # === pseudocode § Final fallback eval (break / epoch=200 两种退出后都跑) ===
-    result = quick_eval_with_ema(
+    # seed_for_eval=epoch+1 与最后一次 phase 2 quick eval (seed_for_eval=epoch) 错开 1 格,
+    # 抽样集合不重叠.
+    result = evaluate_with_ema(
         model, obs_encoder,
         ema_shadow_model, ema_shadow_obs_encoder,
-        task_name=cfg.task_name, seed=cfg.seed, n_episodes=20,
+        env, init_states_all, infer_fn, normalizer, r3m_model, device,
+        n_episodes=cfg.early_stop.eval_episodes, seed_for_eval=epoch + 1,
+        max_steps=cfg.eval.max_steps, action_steps=cfg.infer.action_steps,
     )
-    final_sr = result["sr"]
+    final_sr = result["success_rate"]
     wandb.log({"eval/final_sr": final_sr}, step=global_step)
     if final_sr >= best_sr:
         best_sr = final_sr
