@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# 5 task × 2 seed × {CFM, DP}: 每 task 内先 CFM 双 seed 并行 (cuda:0/1),
-# wait, 再 DP 双 seed 并行, wait. task 之间串行. 共 20 run, 10 批次.
+# 5 task × 3 seed × {CFM, DP} = 30 run, 共 15 批.
+# 每批 cuda:0=CFM cuda:1=DP 同 task 同 seed 并行, seed 与 task 串行.
 # task list 来源 notes/decisions.md 2026-05-12.
-# plan/c2_plan.md §5,§8 写 3 seed; 此处用 2 seed (双卡天然配对, 不留空闲).
+# 3 seed 对齐 plan/c2_plan.md §5,§8 锁定值; 前版 commit 4a96902 的 2 seed 配置废弃.
 
 set -u
 
@@ -18,11 +18,13 @@ TASKS=(
   put_the_wine_bottle_on_top_of_the_cabinet
 )
 
+SEEDS=(42 43 44)
+
 for task in "${TASKS[@]}"; do
-  for method in cfm dp; do
-    echo "=== $(date +%H:%M:%S)  Task: $task  Method: $method ==="
+  for seed in "${SEEDS[@]}"; do
+    echo "=== $(date +%H:%M:%S)  Task: $task  Seed: $seed ==="
     for i in 0 1; do
-      seed=$((42 + i))
+      if [ $i -eq 0 ]; then method=cfm; else method=dp; fi
       python -m src.train \
         --config "configs/${method}_default.yaml" \
         --task_name "$task" \
@@ -32,7 +34,7 @@ for task in "${TASKS[@]}"; do
         > "logs/${method}_${task}_seed${seed}.log" 2>&1 &
     done
     wait
-    echo "=== $(date +%H:%M:%S)  Done: $task / $method ==="
+    echo "=== $(date +%H:%M:%S)  Done: $task / seed $seed ==="
   done
 done
 
