@@ -16,21 +16,33 @@ TASKS=(
   turn_on_the_stove
   put_the_cream_cheese_in_the_bowl
   put_the_wine_bottle_on_top_of_the_cabinet
+  put_the_bowl_on_top_of_the_cabinet
+  put_the_bowl_on_the_stove
+  put_the_bowl_on_the_plate
 )
 
 SEEDS=(42 43 44)
 
+# Resume 策略: output_dir 下有 last_{0,1}.pt -> 续训; 否则从头.
+# 与 src/train.py --resume_dir 行为一致 (ckpt cfg 覆盖, 仅 yaml epoch_max / early_stop 可 override).
 for task in "${TASKS[@]}"; do
   for seed in "${SEEDS[@]}"; do
     echo "=== $(date +%H:%M:%S)  Task: $task  Seed: $seed ==="
     for i in 0 1; do
       if [ $i -eq 0 ]; then method=cfm; else method=dp; fi
+      out_dir="runs/${method}_${task}_seed${seed}"
+      if [ -f "$out_dir/last_0.pt" ] || [ -f "$out_dir/last_1.pt" ]; then
+        resume_flag="--resume_dir $out_dir"
+      else
+        resume_flag=""
+      fi
       python -m src.train \
         --config "configs/${method}_default.yaml" \
         --task_name "$task" \
         --seed $seed \
         --device cuda:$i \
-        --output_dir "runs/${method}_${task}_seed${seed}" \
+        --output_dir "$out_dir" \
+        $resume_flag \
         > "logs/${method}_${task}_seed${seed}.log" 2>&1 &
     done
     wait

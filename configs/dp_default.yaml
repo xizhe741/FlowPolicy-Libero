@@ -54,7 +54,7 @@ optimizer:
 # === Scheduler ===
 scheduler:
   warmup_steps: 500
-  epoch_max: 400
+  epoch_max: 800
 
 # === EMA (decisions 2026-05-14 row 32) ===
 ema:

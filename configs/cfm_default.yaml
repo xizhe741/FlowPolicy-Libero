@@ -51,7 +51,7 @@ optimizer:
 # === Scheduler (warmup_steps=500 与 DP 官方一致; cosine to 0) ===
 scheduler:
   warmup_steps: 500        # decisions 2026-05-16 row 37 (2)
-  epoch_max: 400           # decisions 2026-05-14 row 23
+  epoch_max: 800           # decisions 2026-05-14 row 23
 
 # === EMA (decisions 2026-05-14 row 32) ===
 ema:
