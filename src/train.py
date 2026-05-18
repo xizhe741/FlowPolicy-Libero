@@ -49,6 +49,9 @@ def parse_args():
     p.add_argument("--seed", type=int, default=None)
     p.add_argument("--device", type=str, default=None)
     p.add_argument("--output_dir", type=str, default=None)
+    # resume: 自动选 DIR/last_{0,1}.pt 中 epoch 最大的;
+    # cfg 取 ckpt 内 cfg, 仅 scheduler.epoch_max / early_stop.* 可被 --config override
+    p.add_argument("--resume_dir", type=str, default=None)
     return p.parse_args()
 
 
@@ -56,6 +59,16 @@ def _dict_to_ns(d):
     if isinstance(d, dict):
         return SimpleNamespace(**{k: _dict_to_ns(v) for k, v in d.items()})
     return d
+
+
+def _ns_to_dict(obj):
+    if isinstance(obj, SimpleNamespace):
+        return {k: _ns_to_dict(v) for k, v in obj.__dict__.items()}
+    if isinstance(obj, dict):
+        return {k: _ns_to_dict(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_ns_to_dict(v) for v in obj]
+    return obj
 
 
 def load_cfg(args):
@@ -80,8 +93,51 @@ def load_cfg(args):
     #   eval.{max_steps}
     #   wandb.{project, run_name, mode}   # 缺省由本函数 fallback 填充
     # 约束: unet.obs_dim == 8 * obs_encoder.dim
+    #
+    # resume 模式 (--resume_dir DIR): cfg 取 ckpt 内 cfg, 仅 scheduler.epoch_max 与
+    # early_stop.* 子树允许从 --config override; task_name / seed / device CLI 给冲突值则 raise.
+    # 返回 (cfg, resume_ckpt or None, last_name or None).
     with open(args.config, "r") as f:
-        raw = yaml.safe_load(f)
+        yaml_raw = yaml.safe_load(f)
+
+    if args.resume_dir is not None:
+        resume_dir = Path(args.resume_dir)
+        candidates = []
+        for name in ("last_0.pt", "last_1.pt"):
+            p = resume_dir / name
+            if p.exists():
+                ck = torch.load(p, map_location="cpu")
+                candidates.append((ck["epoch"], name, ck))
+        if not candidates:
+            raise RuntimeError(
+                f"--resume_dir {resume_dir}: 缺 last_0.pt / last_1.pt"
+            )
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        _, last_name, resume_ckpt = candidates[0]
+
+        raw = _ns_to_dict(resume_ckpt["cfg"])
+        # 仅允许 epoch_max / early_stop 从 yaml override
+        if "scheduler" in yaml_raw and "epoch_max" in yaml_raw["scheduler"]:
+            raw["scheduler"]["epoch_max"] = yaml_raw["scheduler"]["epoch_max"]
+        if "early_stop" in yaml_raw:
+            raw.setdefault("early_stop", {}).update(yaml_raw["early_stop"])
+        # output_dir 强制等于 resume_dir
+        raw["output_dir"] = str(resume_dir)
+        # task_name / seed / device: CLI 给值则必须与 ckpt 一致, 否则 raise
+        for k in ("task_name", "seed", "device"):
+            v = getattr(args, k)
+            if v is not None and v != raw.get(k):
+                raise RuntimeError(
+                    f"resume 模式禁用 --{k} override: ckpt={raw.get(k)} CLI={v}"
+                )
+
+        cfg = _dict_to_ns(raw)
+        assert cfg.unet.obs_dim == 8 * cfg.obs_encoder.dim, (
+            f"unet.obs_dim={cfg.unet.obs_dim} 与 8 * obs_encoder.dim={8 * cfg.obs_encoder.dim} 不一致"
+        )
+        return cfg, resume_ckpt, last_name
+
+    raw = yaml_raw
     for k in ("task_name", "seed", "device", "output_dir"):
         v = getattr(args, k)
         if v is not None:
@@ -103,12 +159,12 @@ def load_cfg(args):
     assert cfg.unet.obs_dim == 8 * cfg.obs_encoder.dim, (
         f"unet.obs_dim={cfg.unet.obs_dim} 与 8 * obs_encoder.dim={8 * cfg.obs_encoder.dim} 不一致"
     )
-    return cfg
+    return cfg, None, None
 
 
 # === pseudocode § Optimizer / Scheduler ===
 # "warmup=500 step 线性 0→lr，之后 cosine 退到 0"; executor 选 LambdaLR 实现.
-def cosine_schedule_with_warmup(optimizer, num_warmup_steps, num_training_steps):
+def cosine_schedule_with_warmup(optimizer, num_warmup_steps, num_training_steps, last_epoch=-1):
     def lr_lambda(step):
         if step < num_warmup_steps:
             return float(step) / float(max(1, num_warmup_steps))
@@ -117,7 +173,7 @@ def cosine_schedule_with_warmup(optimizer, num_warmup_steps, num_training_steps)
         )
         return max(0.0, 0.5 * (1.0 + math.cos(math.pi * progress)))
 
-    return LambdaLR(optimizer, lr_lambda)
+    return LambdaLR(optimizer, lr_lambda, last_epoch=last_epoch)
 
 
 # === pseudocode § Helpers: ema_update ===
@@ -176,7 +232,7 @@ def evaluate_with_ema(
 def build_last_state(model, obs_encoder, ema_shadow_model, ema_shadow_obs_encoder,
                      normalizer_state, optimizer, scheduler, epoch, global_step,
                      loss_ema, loss_ema_history, phase, best_sr, stale_count,
-                     last_eval_epoch, cfg):
+                     last_eval_epoch, cfg, last_idx, wandb_run_id):
     return {
         "model_state_dict": model.state_dict(),
         "obs_encoder_state_dict": obs_encoder.state_dict(),
@@ -193,6 +249,8 @@ def build_last_state(model, obs_encoder, ema_shadow_model, ema_shadow_obs_encode
         "best_sr": best_sr,
         "stale_count": stale_count,
         "last_eval_epoch": last_eval_epoch,
+        "last_idx": last_idx,
+        "wandb_run_id": wandb_run_id,
         "torch_rng_state": torch.get_rng_state(),
         "cuda_rng_state": torch.cuda.get_rng_state(),
         "numpy_rng_state": np.random.get_state(),
@@ -223,7 +281,7 @@ def build_best_state(ema_shadow_model, ema_shadow_obs_encoder,
 
 def main():
     args = parse_args()
-    cfg = load_cfg(args)
+    cfg, resume_ckpt, resume_last_name = load_cfg(args)
 
     # === pseudocode § Reproducibility ===
     random.seed(cfg.seed)
@@ -252,6 +310,11 @@ def main():
         dim=cfg.obs_encoder.dim,
     ).to(device)
 
+    # === Resume: model + obs_encoder weights ===
+    if resume_ckpt is not None:
+        model.load_state_dict(resume_ckpt["model_state_dict"])
+        obs_encoder.load_state_dict(resume_ckpt["obs_encoder_state_dict"])
+
     H, d_a = cfg.data.chunk_horizon, cfg.unet.action_dim
     if cfg.method == "cfm":
         from src.cfm import cfm_loss, euler_sample
@@ -272,7 +335,12 @@ def main():
         batch_size=cfg.batch_size, num_workers=cfg.num_workers,
     )
     # pseudocode §"normalizer 在 dataset 上，state_dict() 提取一次（统计量训练全程不变）"
-    normalizer_state = dataloader.dataset.normalizer.state_dict()
+    # Resume 时强制用 ckpt 内 normalizer_state, 防止数据集 reseed 后统计量轻微漂移
+    if resume_ckpt is not None:
+        dataloader.dataset.normalizer.load_state_dict(resume_ckpt["normalizer_state"])
+        normalizer_state = resume_ckpt["normalizer_state"]
+    else:
+        normalizer_state = dataloader.dataset.normalizer.state_dict()
 
     # === LIBERO env / init_states_all (一次性, 给 evaluate_with_ema 复用) ===
     # NOTE: LIBERO API 模板与 src/eval.py main 内一致; 若与本机版本不符调整
@@ -306,47 +374,85 @@ def main():
     # 否则 DataLoader worker fork 后 normalize() 会 cuda/cpu 混算炸掉) ===
     normalizer = copy.deepcopy(dataloader.dataset.normalizer).to(device)
 
+    # === pseudocode § Early-stop state (resume 时从 ckpt 恢复) ===
+    if resume_ckpt is not None:
+        global_step = resume_ckpt["global_step"]
+        epoch_start = resume_ckpt["epoch"] + 1
+        loss_ema = resume_ckpt["loss_ema"]
+        loss_ema_history = list(resume_ckpt["loss_ema_history"])
+        phase = resume_ckpt["phase"]
+        best_sr = resume_ckpt["best_sr"]
+        stale_count = resume_ckpt["stale_count"]
+        last_eval_epoch = resume_ckpt["last_eval_epoch"]
+        # 续训自 resume_ckpt["last_idx"] (新格式) 或 推断自 resume_last_name (旧 ckpt 缺字段);
+        # 写下一个 ckpt 时占用另一 slot, 保留较旧的作 fallback
+        if "last_idx" in resume_ckpt:
+            last_idx = 1 - resume_ckpt["last_idx"]
+        else:
+            last_idx = 1 if resume_last_name == "last_0.pt" else 0
+        # RNG 恢复 (覆盖 cfg.seed 顶部 set 的初始 state)
+        torch.set_rng_state(resume_ckpt["torch_rng_state"])
+        torch.cuda.set_rng_state(resume_ckpt["cuda_rng_state"])
+        np.random.set_state(resume_ckpt["numpy_rng_state"])
+        random.setstate(resume_ckpt["python_rng_state"])
+    else:
+        global_step = 0
+        epoch_start = 0
+        loss_ema = None
+        loss_ema_history = []
+        phase = 1
+        best_sr = -1.0
+        stale_count = 0
+        last_eval_epoch = None
+        last_idx = 0
+
     # === pseudocode § Optimizer / Scheduler ===
     params = list(model.parameters()) + list(obs_encoder.parameters())
     optimizer = AdamW(params, lr=cfg.optimizer.lr, weight_decay=cfg.optimizer.weight_decay)
+    if resume_ckpt is not None:
+        optimizer.load_state_dict(resume_ckpt["optimizer_state_dict"])
     total_steps = cfg.scheduler.epoch_max * len(dataloader)
+    # Resume: 用 last_epoch=global_step-1 让 LambdaLR 跳到当前进度;
+    # 不调 scheduler.load_state_dict, 让新 epoch_max 重塑 cosine 曲线 (退到 0 用新总步数).
     scheduler = cosine_schedule_with_warmup(
-        optimizer, num_warmup_steps=cfg.scheduler.warmup_steps, num_training_steps=total_steps,
+        optimizer, num_warmup_steps=cfg.scheduler.warmup_steps,
+        num_training_steps=total_steps,
+        last_epoch=(global_step - 1) if resume_ckpt is not None else -1,
     )
 
     # === pseudocode § EMA shadow (fp32; 覆盖 model + obs_encoder) ===
-    ema_shadow_model = {
-        k: v.detach().clone().float()
-        for k, v in model.state_dict().items()
-        if v.dtype.is_floating_point
-    }
-    ema_shadow_obs_encoder = {
-        k: v.detach().clone().float()
-        for k, v in obs_encoder.state_dict().items()
-        if v.dtype.is_floating_point
-    }
+    if resume_ckpt is not None:
+        ema_shadow_model = resume_ckpt["ema_shadow_model"]
+        ema_shadow_obs_encoder = resume_ckpt["ema_shadow_obs_encoder"]
+    else:
+        ema_shadow_model = {
+            k: v.detach().clone().float()
+            for k, v in model.state_dict().items()
+            if v.dtype.is_floating_point
+        }
+        ema_shadow_obs_encoder = {
+            k: v.detach().clone().float()
+            for k, v in obs_encoder.state_dict().items()
+            if v.dtype.is_floating_point
+        }
 
     # === pseudocode § wandb ===
-    # spec 改 2: wandb.init 改用 cfg.wandb
-    wandb.init(
-        project=cfg.wandb.project,
-        name=cfg.wandb.run_name,
-        mode=cfg.wandb.mode,
-        config=cfg.__dict__,
-    )
-
-    # === pseudocode § Early-stop state ===
-    loss_ema = None
-    loss_ema_history = []
-    phase = 1
-    best_sr = -1.0
-    stale_count = 0
-    last_eval_epoch = None
-    global_step = 0
-    last_idx = 0
+    # spec 改 2: wandb.init 改用 cfg.wandb;
+    # resume 时复用 ckpt 内 wandb_run_id 续到同一 run.
+    wandb_init_kwargs = {
+        "project": cfg.wandb.project,
+        "name": cfg.wandb.run_name,
+        "mode": cfg.wandb.mode,
+        "config": cfg.__dict__,
+    }
+    if resume_ckpt is not None and resume_ckpt.get("wandb_run_id"):
+        wandb_init_kwargs["id"] = resume_ckpt["wandb_run_id"]
+        wandb_init_kwargs["resume"] = "allow"
+    wandb_run = wandb.init(**wandb_init_kwargs)
+    wandb_run_id = wandb_run.id
 
     # === pseudocode § Main loop ===
-    for epoch in range(cfg.scheduler.epoch_max):
+    for epoch in range(epoch_start, cfg.scheduler.epoch_max):
         epoch_loss_sum = 0.0
         model.train()
         obs_encoder.train()
@@ -427,7 +533,7 @@ def main():
             model, obs_encoder, ema_shadow_model, ema_shadow_obs_encoder,
             normalizer_state, optimizer, scheduler, epoch, global_step,
             loss_ema, loss_ema_history, phase, best_sr, stale_count,
-            last_eval_epoch, cfg,
+            last_eval_epoch, cfg, last_idx, wandb_run_id,
         ), last_tmp)
         os.replace(last_tmp, last_path)
         last_idx = 1 - last_idx
