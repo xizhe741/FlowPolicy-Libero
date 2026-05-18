@@ -67,7 +67,7 @@ def rollout(
         action_denormalized = normalizer.denormalize(action_t)
         action_todo = action_denormalized.squeeze(0).detach().cpu().numpy()
 
-        obs_raw, _, _, info = env.step(action_todo)
+        obs_raw, _, _, _ = env.step(action_todo)
 
         if collect_failure_videos:
             frames.append(obs_raw["agentview_image"].copy())
@@ -79,7 +79,7 @@ def rollout(
         joints_curr      = obs_raw["robot0_joint_pos"]
         grippers_curr    = obs_raw["robot0_gripper_qpos"]
 
-        if info.get("success", False):
+        if env.check_success():
             terminate_reason = "success"
             episode_length = step + 1
             break
@@ -343,11 +343,12 @@ if __name__ == "__main__":
 #      + to numpy                              normalizer.denormalize(action_t) →
 #                                              squeeze + cpu().numpy()
 # spec env.step (F1: done 弃用, 4-tuple
-#      第三位丢弃)                          → obs_raw, _, _, info = env.step(action_todo)
+#      第三位丢弃; info 也丢弃, 本机 LIBERO
+#      返回空 dict)                          → obs_raw, _, _, _ = env.step(action_todo)
 # spec collect_failure_videos →
 #      frames.append(agentview.copy())     → if collect_failure_videos: frames.append(...)
 # spec prev := curr ; curr := obs_raw      → 同名 4 行 prev shift + 4 行 curr 更新
-# spec success → break / else: timeout    → if info.get("success"): break;
+# spec success → break / else: timeout    → if env.check_success(): break;
 #                                            for/else → terminate_reason = "timeout"
 # spec success boolean + np.stack frames   → success = (terminate_reason == "success");
 #                                            frames_out = np.stack(frames, axis=0) if ...

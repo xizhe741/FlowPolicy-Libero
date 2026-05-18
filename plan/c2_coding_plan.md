@@ -177,7 +177,7 @@
 
 1. Eval-time obs 构造与 train-time 共用一个函数（`data.py` 给统一接口）还是 eval 独立实现。
 2. Episode 最大步数上限（如 300 或 400）。
-3. Success 判定：直接信任 LIBERO `info['success']` 还是额外 sanity check。
+3. Success 判定：调用 `env.check_success()` 还是额外 sanity check。（本机 LIBERO `env.step` 返回 info 为空 dict，原 `info['success']` 路径已于 2026-05-18 GT replay 证伪，改用 `env.check_success()`）
 4. 训练中 evaluate 与训练后 evaluate 的起始状态种子是否重叠。
 
 **高价值代码（你写伪代码）**：episode rollout 循环（obs 构造 → 推理调用 → action 反归一化 → receding horizon 执行 → done/success 判定）。这段是 train 与 eval 的 data flow 对齐点。
@@ -190,7 +190,7 @@
 **决策经验来源**：
 
 - Episode 最大步数 → LIBERO 官方 benchmark 的设定，查 LIBERO repo 的 eval 脚本。
-- Success 判定 → LIBERO 官方 eval 协议。通常直接信任 `info['success']`，但先跑 5 个 episode 人工确认 flag 与视觉结果一致。
+- Success 判定 → LIBERO 官方 eval 协议。2026-05-18 GT replay 实测：本机 LIBERO `env.step` 返回 info 为空 dict，正确出口是 `env.check_success()`；replay demo_0 全 170 步末尾 `env.check_success() = True`，确认 BDDL goal predicate 链路健康。
 
 ---
 
