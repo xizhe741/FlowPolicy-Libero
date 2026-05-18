@@ -422,8 +422,10 @@ def main():
 
     # === pseudocode § EMA shadow (fp32; 覆盖 model + obs_encoder) ===
     if resume_ckpt is not None:
-        ema_shadow_model = resume_ckpt["ema_shadow_model"]
-        ema_shadow_obs_encoder = resume_ckpt["ema_shadow_obs_encoder"]
+        # ckpt 用 map_location="cpu" 加载, EMA shadow dict 内 tensor 都在 CPU;
+        # model 已 .to(device), ema_update 内 shadow_val.add_(online_val) 跨 device 失败. 显式迁移.
+        ema_shadow_model = {k: v.to(device) for k, v in resume_ckpt["ema_shadow_model"].items()}
+        ema_shadow_obs_encoder = {k: v.to(device) for k, v in resume_ckpt["ema_shadow_obs_encoder"].items()}
     else:
         ema_shadow_model = {
             k: v.detach().clone().float()
