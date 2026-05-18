@@ -39,7 +39,7 @@ unet:
   action_dim: 7
   obs_dim: 2048
   embedded_dim: 256
-  down_dims: [128, 256, 512]
+  down_dims: [256, 512, 1024]
   kernel_size: 5
 
 # === DP 专属 (decisions 2026-05-14 row 35) ===

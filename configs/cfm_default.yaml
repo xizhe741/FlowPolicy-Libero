@@ -40,7 +40,7 @@ unet:
   action_dim: 7
   obs_dim: 2048            # 必须 == 8 * obs_encoder.dim, train.py L64 assert
   embedded_dim: 256        # time embedding 维, decisions 2026-05-13 row 20
-  down_dims: [128, 256, 512]
+  down_dims: [256, 512, 1024]
   kernel_size: 5
 
 # === Optimizer (decisions 2026-05-16 row 37 (1)(2): 与 DP 官方 yaml 一致) ===
