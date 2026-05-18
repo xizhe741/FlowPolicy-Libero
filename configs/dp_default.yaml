@@ -54,7 +54,7 @@ optimizer:
 # === Scheduler ===
 scheduler:
   warmup_steps: 500
-  epoch_max: 200
+  epoch_max: 400
 
 # === EMA (decisions 2026-05-14 row 32) ===
 ema:
@@ -74,7 +74,7 @@ loss_ema:
 early_stop:
   phase1_min_epoch: 20
   plateau_window: 20
-  plateau_threshold: 0.02
+  plateau_threshold: 0.05
   phase2_eval_interval: 20
   eval_episodes: 20
   patience: 2
