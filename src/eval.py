@@ -35,6 +35,7 @@ def rollout(
     r3m_model,
     device,
     collect_failure_videos: bool,
+    collect_success_videos: bool = False,
 ) -> dict:
 
     env.reset()
@@ -48,7 +49,9 @@ def rollout(
     image_agent_prev, image_wrist_prev = image_agent_curr, image_wrist_curr
     joints_prev, grippers_prev         = joints_curr, grippers_curr
 
-    frames = [] if collect_failure_videos else None
+    # rollout 阶段不知 success/failure, 只要任一收视频开关 True 都先 collect
+    collect_any = collect_failure_videos or collect_success_videos
+    frames = [] if collect_any else None
     terminate_reason = None
     episode_length = max_steps
     chunk = None
@@ -69,7 +72,7 @@ def rollout(
 
         obs_raw, _, _, _ = env.step(action_todo)
 
-        if collect_failure_videos:
+        if collect_any:
             frames.append(obs_raw["agentview_image"].copy())
 
         image_agent_prev, image_wrist_prev = image_agent_curr, image_wrist_curr
@@ -87,7 +90,7 @@ def rollout(
         terminate_reason = "timeout"
 
     success = (terminate_reason == "success")
-    frames_out = np.stack(frames, axis=0) if collect_failure_videos else None
+    frames_out = np.stack(frames, axis=0) if collect_any else None
 
     return {
         "success": success,
@@ -110,23 +113,35 @@ def evaluate(
     collect_failure_videos: bool,
     max_steps,
     action_steps,
+    collect_success_videos: bool = False,
 ) -> dict:
 
     num_episodes = len(init_states_for_episodes)
     successtime = 0
     failure_videos = []
     failure_count = 0
+    success_videos = []
+    success_count = 0
     episode_metadata = []
 
     for episode_id, init_state in enumerate(init_states_for_episodes):
         result = rollout(
             model, obs_encoder, env, init_state, max_steps, action_steps,
             infer_fn, normalizer, r3m_model, device,
-            collect_failure_videos,
+            collect_failure_videos, collect_success_videos,
         )
 
         if result["success"]:
             successtime += 1
+            success_count += 1
+            if collect_success_videos:
+                # 蓄水池采样 Algorithm R, k=5 (与 failure 同 idiom)
+                if len(success_videos) < 5:
+                    success_videos.append(result["frames"])
+                else:
+                    idx = random.randint(0, success_count - 1)
+                    if idx < 5:
+                        success_videos[idx] = result["frames"]
         else:
             failure_count += 1
             if collect_failure_videos:
@@ -148,6 +163,7 @@ def evaluate(
         "success_rate": successtime / num_episodes,
         "episode_metadata": episode_metadata,
         "failure_videos": failure_videos,
+        "success_videos": success_videos,
     }
 
 
@@ -163,6 +179,8 @@ def parse_args():
     parser.add_argument("--num_episodes", type=int, default=None)
     parser.add_argument("--max_steps", type=int, default=None)
     parser.add_argument("--base_seed", type=int, default=0)
+    parser.add_argument("--device", type=str, default=None,
+                        help="cuda:0 / cuda:1 / cpu; 默认 cuda 即 cuda:0")
     return parser.parse_args()
 
 
@@ -179,7 +197,7 @@ def main():
     # ckpt 顶层必含: ema_shadow_model, ema_shadow_obs_encoder, normalizer_state,
     #                task_name, cfg
     args = parse_args()
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device(args.device) if args.device else torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # === step 1: 加载 ckpt ===
     ckpt = torch.load(args.ckpt, map_location=device)
@@ -292,6 +310,7 @@ def main():
         model, obs_encoder, env, init_states_for_episodes,
         infer_fn, normalizer, r3m_model, device,
         collect_failure_videos=True, max_steps=max_steps, action_steps=action_steps,
+        collect_success_videos=True,
     )
 
     # === step 10: 写盘 mp4 + CSV ===
@@ -300,6 +319,8 @@ def main():
 
     for i, frames in enumerate(result["failure_videos"]):
         imageio.mimsave(str(output_dir / f"failure_{i}.mp4"), frames, fps=20)
+    for i, frames in enumerate(result["success_videos"]):
+        imageio.mimsave(str(output_dir / f"success_{i}.mp4"), frames, fps=20)
 
     with open(output_dir / "metrics.csv", "w", newline="") as f:
         writer = csv.writer(f)
