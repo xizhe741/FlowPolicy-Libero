@@ -89,7 +89,7 @@ def load_cfg(args):
     #   ema.{decay}
     #   loss_ema.{alpha}
     #   early_stop.{phase1_min_epoch, plateau_window, plateau_threshold,
-    #               phase2_eval_interval, eval_episodes, patience}
+    #               phase2_eval_interval, eval_episodes, patience, sr_uplift_margin}
     #   eval.{max_steps}
     #   wandb.{project, run_name, mode}   # 缺省由本函数 fallback 填充
     # 约束: unet.obs_dim == 8 * obs_encoder.dim
@@ -573,7 +573,7 @@ def main():
                 ),
             }, step=global_step)
 
-            if sr >= best_sr:                # pseudocode §"`>=` 算上升（决策项 2）"
+            if sr >= best_sr + cfg.early_stop.sr_uplift_margin:  # pseudocode §"`sr >= best_sr + margin` 算上升（决策项 2, decisions 2026-05-19 修订 row 23）"
                 best_sr = sr
                 stale_count = 0
                 best_tmp = output_dir / "best.pt.tmp"

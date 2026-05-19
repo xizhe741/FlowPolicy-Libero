@@ -75,6 +75,7 @@ early_stop:
   phase2_eval_interval: 20 # phase 2 每 N epoch 调用一次训练中 evaluate
   eval_episodes: 20        # 每次训练中 evaluate 跑多少 episode
   patience: 2              # SR 连续未上升次数上限
+  sr_uplift_margin: 0.05   # SR 上升判定 margin (decisions 2026-05-19 row 23 决策 2 修订)
 
 # === Inference (采样步数 + receding horizon stride) ===
 infer:

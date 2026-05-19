@@ -78,6 +78,7 @@ early_stop:
   phase2_eval_interval: 20
   eval_episodes: 20
   patience: 2
+  sr_uplift_margin: 0.05    # decisions 2026-05-19 row 23 决策 2 修订: sr >= best_sr + margin 算上升
 
 # === Inference (采样步数 + receding horizon stride) ===
 infer:
